@@ -2440,10 +2440,10 @@ function generateFacingSpiralPath(shape, shapeParams, stepover, toolRadius) {
   if (!Number.isFinite(stepover) || stepover <= 0) return [];
   if (!Number.isFinite(toolRadius) || toolRadius < 0) toolRadius = 0;
 
-  // Offset the first pass inward by stepover (not tool radius) so the first ring
-  // engages the same amount of material as every subsequent ring.
-  // The tool overhangs the part edge, ensuring full coverage to the boundary.
-  const inset = stepover;
+  // Offset the first pass inward by the smaller of stepover or tool radius.
+  // When stepover < toolRadius: inset = stepover, tool overhangs edge, engagement = stepover (consistent).
+  // When stepover >= toolRadius: inset = toolRadius, tool just reaches edge, no coverage gap.
+  const inset = Math.min(stepover, toolRadius);
   let xMin = -partW / 2 + inset;
   let xMax = partW / 2 - inset;
   let yMin = -partH / 2 + inset;
@@ -2493,15 +2493,13 @@ function generateFacingSpiralPath(shape, shapeParams, stepover, toolRadius) {
         // Collapsed to a point — already there, done
         break;
       } else if (remainingW < eps) {
-        // Collapsed to a vertical line
+        // Collapsed to a vertical line — transition point is already at line start
         const cx = (nextXMin + nextXMax) / 2;
-        path.push({ x: cx, y: nextYMin, z: 0 });
         path.push({ x: cx, y: nextYMax, z: 0 });
         break;
       } else if (remainingH < eps) {
-        // Collapsed to a horizontal line
+        // Collapsed to a horizontal line — transition point is already at line start
         const cy = (nextYMin + nextYMax) / 2;
-        path.push({ x: nextXMin, y: cy, z: 0 });
         path.push({ x: nextXMax, y: cy, z: 0 });
         break;
       } else {
