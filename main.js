@@ -50,6 +50,7 @@ const ZOrigin = {
 const EntryMethod = {
   PLUNGE: "plunge",
   RAMP: "ramp",
+  LEAD_IN: "lead_in",
 };
 
 /**
@@ -1059,7 +1060,7 @@ function readInputsFromForm() {
   const plungeOutside = isSimpleMode ? false : ((operation === OperationType.POCKET || operation === OperationType.FACING || shape === ShapeType.DXF) ? false : plungeOutsideRaw === "on");
 
   const facingModeRaw = (/** @type {HTMLSelectElement} */ (g("facing-mode")))?.value?.trim?.() ?? "";
-  const facingMode = facingModeRaw === "within" ? "within" : "full";
+  const facingMode = facingModeRaw === "within" ? "within" : facingModeRaw === "spiral" ? "spiral" : "full";
   const facingDirectionRaw = isSimpleMode ? "x" : ((/** @type {HTMLSelectElement} */ (g("facing-direction")))?.value?.trim?.() ?? "");
   const facingDirection = facingDirectionRaw === "y" ? "y" : "x";
   const facingEvenSpacing = isSimpleMode ? false : ((/** @type {HTMLInputElement} */ (g("facing-even-spacing")))?.checked ?? false);
@@ -1209,7 +1210,7 @@ function getParamsSnapshotReadOnly() {
   };
   const plungeRaw = el("plunge-outside")?.value ?? "off";
   const plunge = isSimple ? false : ((operation === OperationType.POCKET || operation === OperationType.FACING || shape === ShapeType.DXF) ? false : plungeRaw === "on");
-  const facing = (el("facing-mode")?.value?.trim?.() ?? "") === "within" ? "within" : "full";
+  const facing = (() => { const v = (el("facing-mode")?.value?.trim?.() ?? ""); return v === "within" ? "within" : v === "spiral" ? "spiral" : "full"; })();
   const facingDir = isSimple ? "x" : ((el("facing-direction")?.value?.trim?.() ?? "") === "y" ? "y" : "x");
   const facingEven = isSimple ? false : (el("facing-even-spacing")?.checked ?? false);
   const contour = el("contour-type")?.value === "inside" ? "inside" : "outside";
@@ -1466,7 +1467,7 @@ function computeDepthLevels(totalDepth, stepdown) {
   const numLayers = Math.max(1, Math.ceil(totalDepth / stepdown));
   const layerHeight = totalDepth / numLayers;
   const depths = [];
-  const round1 = (v) => Math.round(v * 10) / 10;
+  const round1 = (v) => Math.round(v * 1000) / 1000;
   for (let i = 1; i <= numLayers; i++) {
     const z = i === numLayers ? -totalDepth : -i * layerHeight;
     depths.push(-round1(Math.abs(z)));
@@ -2420,6 +2421,111 @@ function generateFacingPaths(shape, shapeParams, stepover, toolRadius, facingMod
     }
   }
   return paths;
+}
+
+/**
+ * Generate a single continuous clockwise inward spiral path for facing.
+ * Starts at bottom-left, spirals CW inward by stepover each ring.
+ * All moves are axis-parallel (no diagonals).
+ * @param {string} shape
+ * @param {{ size?: number, width?: number, height?: number }} shapeParams
+ * @param {number} stepover
+ * @param {number} toolRadius
+ * @returns {{x:number,y:number,z:number}[]}
+ */
+function generateFacingSpiralPath(shape, shapeParams, stepover, toolRadius) {
+  const partW = (shape === ShapeType.SQUARE ? shapeParams.size : shapeParams.width);
+  const partH = (shape === ShapeType.SQUARE ? shapeParams.size : shapeParams.height);
+  if (!Number.isFinite(partW) || !Number.isFinite(partH) || partW <= 0 || partH <= 0) return [];
+  if (!Number.isFinite(stepover) || stepover <= 0) return [];
+  if (!Number.isFinite(toolRadius) || toolRadius < 0) toolRadius = 0;
+
+  // Offset the first pass inward by stepover (not tool radius) so the first ring
+  // engages the same amount of material as every subsequent ring.
+  // The tool overhangs the part edge, ensuring full coverage to the boundary.
+  const inset = stepover;
+  let xMin = -partW / 2 + inset;
+  let xMax = partW / 2 - inset;
+  let yMin = -partH / 2 + inset;
+  let yMax = partH / 2 - inset;
+
+  if (xMin > xMax || yMin > yMax) return [];
+
+  const path = [];
+  const eps = 1e-9;
+
+  // Start at bottom-left
+  path.push({ x: xMin, y: yMin, z: 0 });
+
+  let safety = 0;
+  const maxRings = 10000;
+
+  while (safety++ < maxRings) {
+    // Left edge: bottom-left to top-left (Y+)
+    path.push({ x: xMin, y: yMax, z: 0 });
+    // Top edge: top-left to top-right (X+)
+    path.push({ x: xMax, y: yMax, z: 0 });
+    // Right edge: top-right to bottom-right (Y-)
+    path.push({ x: xMax, y: yMin, z: 0 });
+
+    // Compute next ring boundaries (shrink inward by stepover)
+    const nextXMin = xMin + stepover;
+    const nextXMax = xMax - stepover;
+    const nextYMin = yMin + stepover;
+    const nextYMax = yMax - stepover;
+
+    // Check if there is room for another ring
+    const remainingW = nextXMax - nextXMin;
+    const remainingH = nextYMax - nextYMin;
+
+    if (remainingW < -eps || remainingH < -eps) {
+      // No room at all — close bottom edge back to start column (axis-parallel X-)
+      path.push({ x: xMin, y: yMin, z: 0 });
+      break;
+    }
+
+    if (remainingW < stepover - eps || remainingH < stepover - eps) {
+      // Final ring transition: two axis-parallel moves (no diagonal)
+      path.push({ x: nextXMin, y: yMin, z: 0 });    // Bottom edge X-
+      path.push({ x: nextXMin, y: nextYMin, z: 0 }); // Step inward Y+
+
+      if (remainingW < eps && remainingH < eps) {
+        // Collapsed to a point — already there, done
+        break;
+      } else if (remainingW < eps) {
+        // Collapsed to a vertical line
+        const cx = (nextXMin + nextXMax) / 2;
+        path.push({ x: cx, y: nextYMin, z: 0 });
+        path.push({ x: cx, y: nextYMax, z: 0 });
+        break;
+      } else if (remainingH < eps) {
+        // Collapsed to a horizontal line
+        const cy = (nextYMin + nextYMax) / 2;
+        path.push({ x: nextXMin, y: cy, z: 0 });
+        path.push({ x: nextXMax, y: cy, z: 0 });
+        break;
+      } else {
+        // Small remaining rectangle — trace one final ring
+        path.push({ x: nextXMin, y: nextYMax, z: 0 });
+        path.push({ x: nextXMax, y: nextYMax, z: 0 });
+        path.push({ x: nextXMax, y: nextYMin, z: 0 });
+        path.push({ x: nextXMin, y: nextYMin, z: 0 });
+        break;
+      }
+    }
+
+    // Normal ring transition: two axis-parallel moves (no diagonal)
+    path.push({ x: nextXMin, y: yMin, z: 0 });           // Bottom edge X-
+    path.push({ x: nextXMin, y: yMin + stepover, z: 0 }); // Step inward Y+
+
+    // Update boundaries for next ring
+    xMin = nextXMin;
+    xMax = nextXMax;
+    yMin = yMin + stepover;
+    yMax = nextYMax;
+  }
+
+  return path;
 }
 
 /**
@@ -3480,20 +3586,25 @@ function generateToolpath(params) {
   /** @type {{x:number,y:number,z:number}[][]} */
   let facingPaths = [];
   if (shape === ShapeType.FACING || (operation === OperationType.FACING && (shape === ShapeType.SQUARE || shape === ShapeType.RECTANGLE))) {
-    const mode = (params.facingMode && String(params.facingMode).toLowerCase().trim() === "within") ? "within" : "full";
+    const mode = (params.facingMode && String(params.facingMode).toLowerCase().trim() === "within") ? "within" : (params.facingMode && String(params.facingMode).toLowerCase().trim() === "spiral") ? "spiral" : "full";
     const dir = (params.facingDirection && String(params.facingDirection).toLowerCase().trim() === "y") ? "y" : "x";
     const even = !!params.facingEvenSpacing;
     const useShape = shape === ShapeType.FACING ? ShapeType.RECTANGLE : shape;
     const useParams = shapeParams;
-    facingPaths = generateFacingPaths(
-      useShape,
-      useParams,
-      cutParams.stepover,
-      toolRadius,
-      mode,
-      dir,
-      even
-    );
+    if (mode === "spiral") {
+      const spiralPath = generateFacingSpiralPath(useShape, useParams, cutParams.stepover, toolRadius);
+      facingPaths = spiralPath.length > 0 ? [spiralPath] : [];
+    } else {
+      facingPaths = generateFacingPaths(
+        useShape,
+        useParams,
+        cutParams.stepover,
+        toolRadius,
+        mode,
+        dir,
+        even
+      );
+    }
   }
 
   // Voor pocket: één spiraalpad per vorm (stepover, volledige dekking)
@@ -3835,14 +3946,31 @@ function generateToolpath(params) {
         const hw = (isFacingShape ? shapeParams.width : (shape === ShapeType.SQUARE ? shapeParams.size : shapeParams.width)) / 2 - toolRadiusFacing;
         const hh = (isFacingShape ? shapeParams.height : (shape === ShapeType.SQUARE ? shapeParams.size : shapeParams.height)) / 2 - toolRadiusFacing;
         const maxHelixRadiusFacing = Math.max(0, Math.min(hw, hh));
+        // Lead-In for facing: plunge off the part, then feed into material along first cut direction
+        const useFacingLeadIn = entryMethod === EntryMethod.LEAD_IN && facingPaths.length > 0 && facingPaths[0].length >= 2;
         facingPaths.forEach((path, idx) => {
+          let facingPath = path;
+          if (useFacingLeadIn && idx === 0) {
+            // Determine first cut direction and prepend a lead-in point 1.5x tool diameter behind start
+            const p0 = path[0];
+            const p1 = path[1];
+            const dx = p1.x - p0.x;
+            const dy = p1.y - p0.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist > 1e-9) {
+              const leadInDist = cutParams.toolDiameter * 1.5;
+              const leadInX = p0.x - (dx / dist) * leadInDist;
+              const leadInY = p0.y - (dy / dist) * leadInDist;
+              facingPath = [{ x: leadInX, y: leadInY, z: 0 }, ...path];
+            }
+          }
           addLayerForPath(
             moves,
-            path,
+            facingPath,
             depthZ,
             cutParams,
             false,
-            entryMethod,
+            entryMethod === EntryMethod.LEAD_IN ? EntryMethod.PLUNGE : entryMethod,
             idx === 0,
             safeZ,
             undefined,
@@ -7321,11 +7449,12 @@ function setupUI() {
 
       if (value === EntryMethod.RAMP) {
         rampSettings.classList.remove("hidden");
-      } else if (value === EntryMethod.PLUNGE) {
+      } else {
         rampSettings.classList.add("hidden");
       }
       updateRampInputsDisabled();
       updateContourTabsRampHintVisibility();
+      if (typeof updateRegenerateIndicator === "function") updateRegenerateIndicator();
     });
   });
   // init zichtbaarheid ramp-instellingen op basis van huidige entry-method

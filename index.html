@@ -445,6 +445,7 @@
               <select id="facing-mode" name="facing-mode">
                 <option value="within" selected data-i18n="form.facingWithin">Binnen (geen rand buiten gebied)</option>
                 <option value="full" data-i18n="form.facingFull">Helemaal bereiken (volledig vlak)</option>
+                <option value="spiral" data-i18n="form.facingSpiral">Full coverage (spiral)</option>
               </select>
             </div>
             <div id="facing-direction-row" class="field-row facing-only hidden" data-mode="advanced">
@@ -738,6 +739,14 @@
                   data-i18n="form.entryRamp"
                 >
                   Ramp
+                </button>
+                <button
+                  type="button"
+                  class="entry-method-btn"
+                  data-entry="lead_in"
+                  data-i18n="form.entryLeadIn"
+                >
+                  Lead-In
                 </button>
               </div>
               <input type="hidden" id="entry-method" name="entry-method" value="plunge" />
